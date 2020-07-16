@@ -1,5 +1,6 @@
 from optparse import OptionParser
 from os import path
+from time import strftime
 import csv
 import requests
 import json
@@ -14,20 +15,20 @@ vt_api = ""
 jwt, tenant_id, tenant_type, data_region = central_oauth.Authenticate.auth(client_id, client_secret)
 
 def check_vt(sha):
-    url = 'https://www.virustotal.com/vtapi/v2/file/report'
+    u = 'https://www.virustotal.com/vtapi/v2/file/report'
     params = {
             'apikey': f'{vt_api}', 
             'resource': f'{sha}'
             }
-    r = requests.get(url, params=params)
+    r = requests.get(u, params=params)
     if r.status_code == 200:
         j = json.loads(r.text)
         return j
 
 
-def post_blocked_item(sha, comment):
+def add_to_central(sha, comment):
     # use the api_creds to go to the correct URL
-    uri = f'{data_region}/endpoint/v1/settings/blocked-items'
+    u = f'{data_region}/endpoint/v1/settings/blocked-items'
     # Set the headers.
     h = {
         'Authorization': f'Bearer {jwt}',
@@ -42,16 +43,24 @@ def post_blocked_item(sha, comment):
         "comment": f"{comment}",
         }
     # Run the initial request
-    r = requests.post(uri, headers=h, json=p)
+    r = requests.post(u, headers=h, json=p)
     # Make it JSON to make it easier.
     j = json.loads(r.text)
-    print(j)
 
 
-def add_to_central(**kwargs):
+def write_output(outfile, sha, outcome):
+    with open(outfile, "a") as f:
+        csv_out = csv.writer(f, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        csv_out.writerow([sha, outcome])
+
+
+def parse_objects(**kwargs):
     # If filename is set loop through
     if kwargs.get('filename'):
-        # Open File
+        # If output is set then add the filename
+        if kwargs.get('output'):
+            out_file = f'{strftime("%Y_%m_%d_%H_%M_%S")}.csv'
+        # Open CSV file to read
         f = open(kwargs.get('filename'))
         # read 
         reader = csv.reader(f)
@@ -65,22 +74,31 @@ def add_to_central(**kwargs):
                 if vt['response_code'] == 1:
                     if vt['scans']['Sophos']['detected']:
                         # Detected So Skip
-                        print('detected by sophos')
+                        outcome = 'Already Known bad by SOPHOS'
                     else:
                         # Known to Virus total not detected by SOPHOS on VirusTotal
-                        post_blocked_item(row[0], row[1])
+                        add_to_central(row[0], row[1])
+                        outcome = 'Added to SOPHOS Central'
                 else:
                     # Not known to Virus Total so add it to Central
-                    post_blocked_item(row[0], row[1])
+                    add_to_central(row[0], row[1])
+                    outcome = 'Added to SOPHOS Central'
             # if virus total isn't set
             else:
                 # post to central
-                post_blocked_item(row[0], row[1])
+                add_to_central(row[0], row[1])
+                outcome = 'Added to SOPHOS Central'
+            # if output is set then run the output function
+            if kwargs.get('output'):
+                write_output(out_file, row[0], outcome) 
         # Close File
         f.close()
 
     # If SHA is set then add the one off
     if kwargs.get('sha'):
+        # If output is set then add the filename
+        if kwargs.get('output'):
+            out_file = f'{strftime("%Y_%m_%d_%H_%M_%S")}.csv'
         # If Virus Total is selected
         if kwargs.get('virustotal'):
             # Run check_vt to get a response
@@ -89,21 +107,26 @@ def add_to_central(**kwargs):
             if vt['response_code'] == 1:
                 if vt['scans']['Sophos']['detected']:
                     # Detected So Skip
-                    print('detected by sophos')
+                    outcome = 'Already Known bad by SOPHOS'
                 else:
                     # Known to Virus total not detected by SOPHOS on VirusTotal
-                    post_blocked_item(kwargs.get('sha'), kwargs.get('comment'))
+                    add_to_central(kwargs.get('sha'), kwargs.get('comment'))
+                    outcome = 'Added to SOPHOS Central'
             else:
                 # Not known to Virus Total so add it to Central
-                post_blocked_item(kwargs.get('sha'), kwargs.get('comment'))
+                add_to_central(kwargs.get('sha'), kwargs.get('comment'))
+                outcome = 'Added to SOPHOS Central'
         # if virus total isn't set
         else:
             # post to central
-            post_blocked_item(kwargs.get('sha'), kwargs.get('comment'))
+            add_to_central(kwargs.get('sha'), kwargs.get('comment'))
+            outcome = 'Added to SOPHOS Central'
+        # If output is set send it to the function to write the CSV
+        if kwargs.get('output'):
+            write_output(out_file, kwargs.get('sha'), outcome)
 
 
 if __name__ == "__main__":
-
     # Setup usage
     usage = "usage: --file FILENAME --virustotal --sha SHA --comment COMMENT --output FILENAME"
     # Set Usage and initialise option parser
@@ -112,7 +135,8 @@ if __name__ == "__main__":
     parser.add_option("-f", "--file", dest="filename",
                     help="File to import to SOPHOS Central, this should be a CSV formatted: sha256, comment")
     parser.add_option("-o", "--output", dest="output",
-                    help="File to output report too. Not yet implimented")
+                    help="Output the outcome of each file",
+                    action="store_true", default=False)
     parser.add_option("-s", "--sha", dest="sha",
                     help="A SHA to quickly add to SOPHOS Central if no CSV is provided")
     parser.add_option("-c", "--comment", dest="comment",
@@ -129,14 +153,13 @@ if __name__ == "__main__":
             # Error out
             parser.error(msg="A comment is needed when parsing a SHA")
         # Else Add to central
-        add_to_central(sha=options.sha, comment=options.comment)
-
+        parse_objects(sha=options.sha, comment=options.comment, output=options.output, virustotal=options.virustotal)
     # Else if filename is set loop through.
     elif options.filename:
         # check to see if a path exists
         if path.isfile(path=options.filename):
             # Add to central
-            add_to_central(filename=options.filename)
+            parse_objects(filename=options.filename, output=options.output, virustotal=options.virustotal)
         # If path doesn't exist
         else:
             # Error out
